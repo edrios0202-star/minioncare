@@ -2,9 +2,9 @@
 <html lang="en"><head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-<meta name="theme-color" content="#262B29" />
+<meta name="theme-color" content="#F4F7F3" />
 <title>Gift Log</title>
-<style>html,body{margin:0;padding:0;background:#262B29;}#root{min-height:100vh;}#boot{font-family:sans-serif;color:#9AA39C;display:flex;height:100vh;align-items:center;justify-content:center;}</style>
+<style>html,body{margin:0;padding:0;background:#F4F7F3;}#root{min-height:100vh;}#boot{font-family:sans-serif;color:#6E7A70;display:flex;height:100vh;align-items:center;justify-content:center;}</style>
 <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-database-compat.js"></script>
@@ -69,7 +69,9 @@ const STATUS = {
   given: { label: "Given", dot: "#C06079" },
 };
 const STATUS_ORDER = ["idea", "bought", "wrapped", "given"];
-const TABS = ["People", "Occasions", "Wrapping"];
+const CARD_STATUS = { planned: { label: "Planned", dot: "#C7CCD4" }, making: { label: "Making", dot: "#6FC9AB" }, done: { label: "Done", dot: "#3FB392" } };
+const CARD_ORDER = ["planned", "making", "done"];
+const TABS = ["People", "Occasions", "Cards", "Wrapping"];
 
 const SEED_PEOPLE = [{ id: "pp1", name: "David", relationship: "Brother", sizes: "", interests: "", avoid: "", notes: "", dates: [] }];
 
@@ -105,6 +107,7 @@ function GiftLog() {
   const [people, setPeople] = useState(SEED_PEOPLE);
   const [gifts, setGifts] = useState([]);
   const [wraps, setWraps] = useState([]);
+  const [cards, setCards] = useState([]);
   const [settings, setSettings] = useState({ leadWeeks: 3 });
   const [openId, setOpenId] = useState(null);
   const [restoreMsg, setRestoreMsg] = useState("");
@@ -126,9 +129,9 @@ function GiftLog() {
     const ref = stateRef();
     const cb = ref.on("value", (snap) => {
       const v = snap.val() || {};
-      const ppl = v.people || SEED_PEOPLE, gfs = v.gifts || [], wrp = v.wraps || [], stg = v.settings || { leadWeeks: 3 };
-      remoteRef.current = JSON.stringify({ people: ppl, gifts: gfs, wraps: wrp, settings: stg });
-      setPeople(ppl); setGifts(gfs); setWraps(wrp); setSettings(stg);
+      const ppl = v.people || SEED_PEOPLE, gfs = v.gifts || [], wrp = v.wraps || [], crd = v.cards || [], stg = v.settings || { leadWeeks: 3 };
+      remoteRef.current = JSON.stringify({ people: ppl, gifts: gfs, wraps: wrp, cards: crd, settings: stg });
+      setPeople(ppl); setGifts(gfs); setWraps(wrp); setCards(crd); setSettings(stg);
       setLoaded(true);
     }, (err) => { console.error(err); setLoaded(true); });
     return () => ref.off("value", cb);
@@ -136,12 +139,12 @@ function GiftLog() {
 
   useEffect(() => {
     if (!loaded || !authed) return;
-    const bundle = { people, gifts, wraps, settings };
+    const bundle = { people, gifts, wraps, cards, settings };
     const j = JSON.stringify(bundle);
     if (j === remoteRef.current) return;
     remoteRef.current = j;
     stateRef().set(bundle);
-  }, [people, gifts, wraps, settings, loaded, authed]);
+  }, [people, gifts, wraps, cards, settings, loaded, authed]);
 
   const upcoming = useMemo(() => {
     const out = [];
@@ -180,9 +183,9 @@ function GiftLog() {
   const styleTag = (
     <style>{`
       @import url('https://fonts.googleapis.com/css2?family=Quicksand:wght@400;500;600;700&family=Figtree:wght@400;500;600&display=swap');
-      :root{ --bg:#262B29; --card:#2F3633; --card2:#3A423D; --ink:#ECEFEA; --muted:#9AA39C; --line:#3D453F;
-        --burgundy:#A23E55; --burgundy-soft:rgba(162,62,85,.16); --mint:#6FC9AB; --mint-soft:#36433D;
-        --silver:#C7CCD4; --silver-soft:rgba(199,204,212,.20); --silver-dim:#9AA0A8; }
+      :root{ --bg:#F4F7F3; --card:#FFFFFF; --card2:#EAF0EA; --ink:#26302A; --muted:#6E7A70; --line:#DCE5DD;
+        --burgundy:#A23E55; --burgundy-soft:rgba(162,62,85,.12); --mint:#1F8F6E; --mint-soft:#E3F1EB;
+        --silver:#566B5E; --silver-soft:rgba(86,107,94,.18); --silver-dim:#7C8A80; }
       .gl *{box-sizing:border-box;}
       .gl{background:var(--bg);color:var(--ink);font-family:'Figtree',sans-serif;min-height:100vh;}
       .disp{font-family:'Quicksand',sans-serif;}
@@ -246,6 +249,7 @@ function GiftLog() {
             <div className="fade" key={tab}>
               {tab === "People" && <PeopleView people={people} setPeople={setPeople} gifts={gifts} setGifts={setGifts} upcoming={upcoming} settings={settings} setSettings={setSettings} onOpen={open} backup={backup} restore={restore} restoreMsg={restoreMsg} />}
               {tab === "Occasions" && <OccasionsView gifts={gifts} people={people} onOpen={open} />}
+              {tab === "Cards" && <CardsView cards={cards} setCards={setCards} people={people} />}
               {tab === "Wrapping" && <WrappingView wraps={wraps} setWraps={setWraps} />}
             </div>
           </>
@@ -290,9 +294,28 @@ function PeopleView({ people, setPeople, gifts, setGifts, upcoming, settings, se
   const [q, setQ] = useState("");
   const [favOnly, setFavOnly] = useState(false);
   const [editGift, setEditGift] = useState(null);
+  const [newPerson, setNewPerson] = useState("");
   const lead = (settings.leadWeeks || 0) * 7;
 
   const addPerson = () => { const p = { id: uid("pp"), name: "New person", relationship: "", sizes: "", interests: "", avoid: "", notes: "", dates: [] }; setPeople((x) => [...x, p]); onOpen(p.id); };
+  const addPersonQuick = () => { const t = newPerson.trim(); if (!t) return; setPeople((x) => [...x, { id: uid("pp"), name: t, relationship: "", sizes: "", interests: "", avoid: "", notes: "", dates: [] }]); setNewPerson(""); };
+  const importVcf = (file) => {
+    const r = new FileReader();
+    r.onload = () => {
+      const txt = String(r.result || "").replace(/\r/g, "");
+      const get = (re) => { const m = txt.match(re); return m ? m[1].trim() : ""; };
+      let name = get(/(?:^|\n)FN[^:\n]*:(.+)/i);
+      if (!name) { const nm = get(/(?:^|\n)N[^:\n]*:(.+)/i); if (nm) { const parts = nm.split(";"); name = `${parts[1] || ""} ${parts[0] || ""}`.trim(); } }
+      name = (name || "New contact").replace(/\\,/g, ",").trim();
+      const bday = get(/(?:^|\n)BDAY[^:\n]*:([0-9T:\-]+)/i);
+      const dates = [];
+      const digits = bday.replace(/[^0-9]/g, "");
+      if (digits.length >= 8) dates.push({ id: uid("d"), label: "Birthday", date: `${digits.slice(0, 4)}-${digits.slice(4, 6)}-${digits.slice(6, 8)}`, recur: true });
+      const p = { id: uid("pp"), name, relationship: "", sizes: "", interests: "", avoid: "", notes: "", dates };
+      setPeople((x) => [...x, p]); onOpen(p.id);
+    };
+    r.readAsText(file);
+  };
   const quickAdd = () => { const t = capItem.trim(); if (!t) return; setGifts((g) => [{ id: uid("g"), personId: capPerson, item: t, occasion: "", price: "", link: "", notes: "", prep: "", status: "idea", fav: false, image: "", givenYear: null }, ...g]); setCapItem(""); };
   const ideaCount = (pid) => gifts.filter((g) => g.personId === pid && g.status !== "given").length;
   const nextFor = (pid) => upcoming.find((u) => u.personId === pid);
@@ -379,7 +402,16 @@ function PeopleView({ people, setPeople, gifts, setGifts, upcoming, settings, se
               );
             })}
           </div>
-          <button className="btn" onClick={addPerson}>+ Add person</button>
+          <div className="card" style={{ padding: 14, display: "grid", gap: 10 }}>
+            <div style={{ display: "flex", gap: 8 }}>
+              <input value={newPerson} onChange={(e) => setNewPerson(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addPersonQuick()} placeholder="Add a person by name…" style={{ flex: 1 }} />
+              <button className="btn btn-accent" style={{ padding: "9px 16px" }} onClick={addPersonQuick}>+ Add</button>
+            </div>
+            <label className="btn" style={{ textAlign: "center", cursor: "pointer" }}>Import from a contact card (.vcf)
+              <input type="file" accept=".vcf,text/vcard" style={{ display: "none" }} onChange={(e) => { const f = e.target.files && e.target.files[0]; if (f) importVcf(f); e.target.value = ""; }} />
+            </label>
+            <div style={{ fontSize: 11.5, color: "var(--muted)", textAlign: "center" }}>On iPhone: open the contact → Share Contact → Save to Files, then pick it here. It'll grab their name and birthday.</div>
+          </div>
 
           {unassigned.length > 0 && (
             <div>
@@ -458,6 +490,53 @@ function OccasionsView({ gifts, people, onOpen }) {
 }
 
 // ---------- Wrapping view ----------
+function CardsView({ cards, setCards, people }) {
+  const [title, setTitle] = useState("");
+  const add = () => { const t = title.trim(); if (!t) return; setCards((x) => [{ id: uid("c"), title: t, forName: "", occasion: "", status: "planned", notes: "", image: "" }, ...x]); setTitle(""); };
+  const set = (id, patch) => setCards((x) => x.map((c) => c.id === id ? { ...c, ...patch } : c));
+  const rm = (id) => setCards((x) => x.filter((c) => c.id !== id));
+  const cycle = (c) => set(c.id, { status: CARD_ORDER[(CARD_ORDER.indexOf(c.status) + 1) % 3] });
+  const setPhoto = async (id, file) => { try { const d = await fileToThumb(file, 600); set(id, { image: d }); } catch (e) { console.error(e); } };
+  return (
+    <div style={{ display: "grid", gap: 14 }}>
+      <div className="card" style={{ padding: 14, display: "flex", gap: 8, alignItems: "center" }}>
+        <input value={title} onChange={(e) => setTitle(e.target.value)} onKeyDown={(e) => e.key === "Enter" && add()} placeholder="New card — e.g. Birthday card for Mom" style={{ flex: 1 }} />
+        <button className="btn btn-accent" style={{ padding: "9px 16px" }} onClick={add}>+ Add</button>
+      </div>
+      {cards.length === 0 && <Empty text="No cards yet. Track the handmade cards you're making here." />}
+      {cards.map((c) => {
+        const st = CARD_STATUS[c.status] || CARD_STATUS.planned;
+        return (
+          <div key={c.id} className="card" style={{ padding: 16, display: "grid", gap: 12 }}>
+            <div style={{ display: "flex", gap: 11, alignItems: "flex-start" }}>
+              {c.image
+                ? <img src={c.image} alt="" style={{ width: 54, height: 54, borderRadius: 10, objectFit: "cover", flexShrink: 0 }} />
+                : <div style={{ width: 54, height: 54, borderRadius: 10, background: "var(--card2)", flexShrink: 0 }} />}
+              <div style={{ flex: 1, minWidth: 0, display: "grid", gap: 8 }}>
+                <input value={c.title} onChange={(e) => set(c.id, { title: e.target.value })} placeholder="Card" style={{ fontWeight: 600 }} />
+                <div style={{ display: "flex", gap: 8 }}>
+                  <select value={c.forName} onChange={(e) => set(c.id, { forName: e.target.value })} style={{ flex: 1 }}>
+                    <option value="">For… (optional)</option>
+                    {people.map((p) => <option key={p.id} value={p.name}>{p.name}</option>)}
+                  </select>
+                  <input value={c.occasion} onChange={(e) => set(c.id, { occasion: e.target.value })} placeholder="Occasion" style={{ flex: 1 }} />
+                </div>
+              </div>
+            </div>
+            <textarea rows={2} value={c.notes} onChange={(e) => set(c.id, { notes: e.target.value })} placeholder="Design ideas, materials, colors…" />
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <button onClick={() => cycle(c)} className="chip" style={{ cursor: "pointer", border: "none" }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: st.dot }} />{st.label}</button>
+              <label className="chip" style={{ cursor: "pointer" }}>{c.image ? "Replace photo" : "Add photo"}<input type="file" accept="image/*" style={{ display: "none" }} onChange={(e) => { const f = e.target.files && e.target.files[0]; if (f) setPhoto(c.id, f); e.target.value = ""; }} /></label>
+              {c.image && <button onClick={() => set(c.id, { image: "" })} className="chip" style={{ cursor: "pointer", border: "none" }}>remove photo</button>}
+              <button onClick={() => rm(c.id)} className="chip" style={{ cursor: "pointer", border: "none", color: "var(--burgundy)" }}>delete</button>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function WrappingView({ wraps, setWraps }) {
   const addImg = async (file) => { try { const d = await fileToThumb(file, 700); setWraps((x) => [{ id: uid("w"), image: d, note: "" }, ...x]); } catch (e) { console.error(e); } };
   const setNote = (id, note) => setWraps((x) => x.map((w) => w.id === id ? { ...w, note } : w));
