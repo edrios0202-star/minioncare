@@ -1,41 +1,10 @@
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-<meta name="apple-mobile-web-app-capable" content="yes" />
-<meta name="theme-color" content="#FAFAF7" />
-<title>MinionCare</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%90%BE%3C/text%3E%3C/svg%3E" />
-<style>html,body{margin:0;padding:0;background:#FAFAF7;}#root{min-height:100vh;}#boot{font-family:sans-serif;color:#8C8C86;display:flex;height:100vh;align-items:center;justify-content:center;}</style>
-<script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-app-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-auth-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-database-compat.js"></script>
-<script>
-  const firebaseConfig = {
-  apiKey: "AIzaSyBptQRoX1uX6YMQsdAvryMtXkXJ68ifFrc",
-  authDomain: "minioncare-1a412.firebaseapp.com",
-  databaseURL: "https://minioncare-1a412-default-rtdb.firebaseio.com",
-  projectId: "minioncare-1a412",
-  storageBucket: "minioncare-1a412.firebasestorage.app",
-  messagingSenderId: "222297445043",
-  appId: "1:222297445043:web:5c90ec7d97fbb739d756c6"
-  };
-  firebase.initializeApp(firebaseConfig);
-</script>
-<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
-<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-</head>
-<body>
-<div id="root"><div id="boot">Loading MinionCare…</div></div>
-<script type="text/babel" data-presets="env,react">
+import React, { useState, useEffect, useMemo, useRef } from "react";
+import * as XLSX from "xlsx";
 
-// ---------- storage (shared via Firebase) ----------
-const STATE_PATH = "minioncare/state";
-const stateRef = () => firebase.database().ref(STATE_PATH);
-const ALLOW = ["erikadrios@gmail.com", "drios0325@gmail.com", "drey772@gmail.com", "erikarios.arias@gmail.com", "dpms1025@gmail.com"];
+// ---------- storage (shared across the family) ----------
+const hasStore = typeof window !== "undefined" && window.storage;
+const load = async (key, fb, shared = false) => { if (!hasStore) return fb; try { const r = await window.storage.get(key, shared); return r && r.value ? JSON.parse(r.value) : fb; } catch { return fb; } };
+const save = async (key, v, shared = false) => { if (!hasStore) return; try { await window.storage.set(key, JSON.stringify(v), shared); } catch (e) { console.error(e); } };
 const uid = (p) => p + Date.now() + Math.random().toString(36).slice(2, 6);
 const clone = (o) => JSON.parse(JSON.stringify(o));
 const todayKey = () => new Date().toISOString().slice(0, 10);
@@ -63,36 +32,34 @@ const ACTIVITIES = ["Walk", "Play", "Potty", "Litter"];
 const SLOTS = ["AM", "PM"];
 const DEFAULT = { pets: [], supplies: [], log: {} };
 
-const { useState, useEffect, useMemo, useRef } = React;
-
-function PetCare() {
+export default function PetCare() {
   const [loaded, setLoaded] = useState(false);
   const [tab, setTab] = useState("Dashboard");
   const [data, setData] = useState(DEFAULT);
-  const [user, setUser] = useState(null);
-  const [authReady, setAuthReady] = useState(false);
-  const authed = !!user && ALLOW.includes((user.email || "").toLowerCase());
-  const me = user ? (user.displayName || user.email || "someone") : "someone";
+  const [me, setMe] = useState("");
   const [openPet, setOpenPet] = useState(null);
   const dataRef = useRef(data);
   useEffect(() => { dataRef.current = data; }, [data]);
 
-  const signIn = () => { const p = new firebase.auth.GoogleAuthProvider(); firebase.auth().signInWithPopup(p).catch(() => { try { firebase.auth().signInWithRedirect(p); } catch (e) {} }); };
-  const signOut = () => { try { firebase.auth().signOut(); } catch (e) {} };
+  useEffect(() => { (async () => {
+    setData(await load("petcare:state", DEFAULT, true));
+    setMe(await load("petcare:me", "", false));
+    setLoaded(true);
+  })(); }, []);
+  useEffect(() => { if (loaded) save("petcare:me", me, false); }, [me, loaded]);
 
+  // poll shared state so the family stays in sync
   useEffect(() => {
-    const unsub = firebase.auth().onAuthStateChanged((u) => { setUser(u); setAuthReady(true); });
-    return () => unsub();
-  }, []);
+    if (!loaded) return;
+    const tick = async () => { const fresh = await load("petcare:state", null, true); if (fresh && JSON.stringify(fresh) !== JSON.stringify(dataRef.current)) setData(fresh); };
+    const iv = setInterval(tick, 8000);
+    const onFocus = () => tick();
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onFocus);
+    return () => { clearInterval(iv); window.removeEventListener("focus", onFocus); document.removeEventListener("visibilitychange", onFocus); };
+  }, [loaded]);
 
-  useEffect(() => {
-    if (!authed) { setLoaded(false); return; }
-    const ref = stateRef();
-    const cb = ref.on("value", (snap) => { const v = snap.val() || {}; setData({ pets: v.pets || [], supplies: v.supplies || [], log: v.log || {} }); setLoaded(true); }, (err) => { console.error(err); setLoaded(true); });
-    return () => ref.off("value", cb);
-  }, [authed]);
-
-  const update = (fn) => setData((prev) => { const next = typeof fn === "function" ? fn(clone(prev)) : fn; stateRef().set(next); return next; });
+  const update = (fn) => setData((prev) => { const next = typeof fn === "function" ? fn(clone(prev)) : fn; save("petcare:state", next, true); return next; });
 
   // notify the day before a vet visit (fires when the app is open + reminders allowed)
   useEffect(() => {
@@ -127,24 +94,7 @@ function PetCare() {
     `}</style>
   );
 
-  const screen = (inner) => <div className="pc" style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh", padding: 24 }}>{styleTag}{inner}</div>;
-  if (!authReady) return screen(<span className="disp" style={{ color: "var(--muted)" }}>Loading…</span>);
-  if (!user) return screen(
-    <div style={{ textAlign: "center", maxWidth: 320 }}>
-      <PomLogo size={64} />
-      <div className="disp" style={{ fontSize: 26, fontWeight: 700, margin: "10px 0 6px" }}>MinionCare</div>
-      <div style={{ color: "var(--muted)", fontSize: 14, marginBottom: 20 }}>Sign in to see and update the family's pets.</div>
-      <button className="btn btn-accent" onClick={signIn} style={{ fontSize: 15 }}>Sign in with Google</button>
-    </div>
-  );
-  if (!authed) return screen(
-    <div style={{ textAlign: "center", maxWidth: 340 }}>
-      <div className="disp" style={{ fontSize: 20, fontWeight: 700, marginBottom: 8 }}>Not on the list</div>
-      <div style={{ color: "var(--muted)", fontSize: 14, marginBottom: 18 }}>{user.email} isn't on the family access list. Sign in with an approved account, or ask Erika to add this address.</div>
-      <button className="btn" onClick={signOut}>Sign out</button>
-    </div>
-  );
-  if (!loaded) return screen(<span className="disp" style={{ color: "var(--muted)" }}>Loading…</span>);
+  if (!loaded) return <div className="pc" style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100vh" }}>{styleTag}<span className="disp" style={{ color: "var(--muted)" }}>Loading…</span></div>;
 
   const pet = data.pets.find((p) => p.id === openPet);
 
@@ -157,9 +107,9 @@ function PetCare() {
             <PomLogo size={40} />
             <div className="disp" style={{ fontSize: 25, fontWeight: 700 }}>MinionCare</div>
           </div>
-          <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2 }}>
-            <span style={{ fontSize: 12.5, fontWeight: 700 }}>{me}</span>
-            <button onClick={signOut} style={{ background: "none", border: "none", color: "var(--muted)", fontSize: 11, cursor: "pointer", padding: 0, textDecoration: "underline" }}>Sign out</button>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <span style={{ fontSize: 11, color: "var(--muted)" }}>you:</span>
+            <input value={me} onChange={(e) => setMe(e.target.value)} placeholder="name" style={{ width: 78, padding: "5px 8px", fontSize: 12.5 }} />
           </div>
         </header>
 
@@ -175,7 +125,7 @@ function PetCare() {
               {tab === "Pets" && <PetsView data={data} update={update} onOpen={setOpenPet} />}
               {tab === "Vet" && <VetVisitsView data={data} update={update} />}
               {tab === "Supplies" && <SuppliesView data={data} update={update} />}
-              {tab === "More" && <MoreView data={data} setData={setData} update={update} me={me} />}
+              {tab === "More" && <MoreView data={data} setData={setData} update={update} me={me} setMe={setMe} />}
             </div>
           </>
         )}
@@ -752,7 +702,7 @@ function VetVisitsView({ data, update }) {
 }
 
 // ---------- More ----------
-function MoreView({ data, setData, update, me }) {
+function MoreView({ data, setData, update, me, setMe }) {
   const [sheet, setSheet] = useState("");
   const careSheet = () => {
     let t = `MINIONCARE — CARE SHEET\n\n`;
@@ -792,7 +742,8 @@ function MoreView({ data, setData, update, me }) {
     <div style={{ display: "grid", gap: 16 }}>
       <div className="card" style={{ padding: 16 }}>
         <div className="disp" style={{ fontSize: 16, fontWeight: 600, marginBottom: 8 }}>Sharing with family</div>
-        <div style={{ fontSize: 13, color: "var(--muted)" }}>Everyone on the family list signs in with their own Google account and sees the same pets, syncing in real time. Whatever you check off is automatically stamped with your name — no need to type it.</div>
+        <div style={{ fontSize: 13, color: "var(--muted)" }}>Everyone you share this app's link with sees and edits the same pets — it syncs automatically every few seconds and when you reopen it. Set your name up top so feedings and doses show who did them.</div>
+        <div style={{ marginTop: 12 }}><label>Your name (this device)</label><input value={me} onChange={(e) => setMe(e.target.value)} placeholder="e.g. Erika" /></div>
       </div>
 
       <div className="card" style={{ padding: 16 }}>
@@ -821,10 +772,3 @@ function MoreView({ data, setData, update, me }) {
     </div>
   );
 }
-
-const root = ReactDOM.createRoot(document.getElementById("root"));
-root.render(React.createElement(PetCare));
-
-</script>
-</body>
-</html>
