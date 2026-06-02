@@ -8,9 +8,8 @@
 <title>MinionCare</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%90%BE%3C/text%3E%3C/svg%3E" />
 <style>html,body{margin:0;padding:0;background:#FAFAF7;}#root{min-height:100vh;}#boot{font-family:sans-serif;color:#8C8C86;display:flex;height:100vh;align-items:center;justify-content:center;}</style>
-
-<!-- Firebase (realtime shared data) -->
 <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-database-compat.js"></script>
 <script>
   const firebaseConfig = {
@@ -24,8 +23,6 @@
   };
   firebase.initializeApp(firebaseConfig);
 </script>
-
-<!-- React + JSX + Excel -->
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -38,6 +35,7 @@
 // ---------- storage (shared via Firebase) ----------
 const STATE_PATH = "minioncare/state";
 const stateRef = () => firebase.database().ref(STATE_PATH);
+const ALLOW = ["erikadrios@gmail.com", "drios0325@gmail.com", "drey772@gmail.com", "erikarios.arias@gmail.com", "dpms1025@gmail.com"];
 const uid = (p) => p + Date.now() + Math.random().toString(36).slice(2, 6);
 const clone = (o) => JSON.parse(JSON.stringify(o));
 const todayKey = () => new Date().toISOString().slice(0, 10);
@@ -51,43 +49,61 @@ const fileToThumb = (file, max = 700) => new Promise((res, rej) => {
 });
 
 const pad = (n) => String(n).padStart(2, "0");
-const gcalUrl = ({ title, date, time, details = "" }) => {
+const gcalUrl = ({ title, date, time, details = "", location = "" }) => {
   if (!date) return null;
   let dates;
   if (time) { const s = new Date(`${date}T${time}`), e = new Date(s.getTime() + 30 * 60000); const f = (d) => `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}T${pad(d.getHours())}${pad(d.getMinutes())}00`; dates = `${f(s)}/${f(e)}`; }
   else { const s = date.replace(/-/g, ""); const d2 = new Date(`${date}T00:00`); d2.setDate(d2.getDate() + 1); dates = `${s}/${d2.getFullYear()}${pad(d2.getMonth() + 1)}${pad(d2.getDate())}`; }
-  return `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${encodeURIComponent(title)}&dates=${dates}&details=${encodeURIComponent(details)}`;
+  return `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${encodeURIComponent(title)}&dates=${dates}&details=${encodeURIComponent(details)}${location ? "&location=" + encodeURIComponent(location) : ""}`;
 };
 const addToCal = (o) => { const u = gcalUrl(o); if (u) window.open(u, "_blank"); };
 
-const TABS = ["Today", "Pets", "Supplies", "More"];
+const TABS = ["Dashboard", "Pets", "Supplies", "More"];
 const ACTIVITIES = ["Walk", "Play", "Potty", "Litter"];
+const SLOTS = ["AM", "PM"];
 const DEFAULT = { pets: [], supplies: [], log: {} };
 
 const { useState, useEffect, useMemo, useRef } = React;
 
 function PetCare() {
   const [loaded, setLoaded] = useState(false);
-  const [tab, setTab] = useState("Today");
+  const [tab, setTab] = useState("Dashboard");
   const [data, setData] = useState(DEFAULT);
-  const [me, setMe] = useState("");
+  const [user, setUser] = useState(null);
+  const [authReady, setAuthReady] = useState(false);
+  const authed = !!user && ALLOW.includes((user.email || "").toLowerCase());
+  const me = user ? (user.displayName || user.email || "someone") : "someone";
   const [openPet, setOpenPet] = useState(null);
   const dataRef = useRef(data);
   useEffect(() => { dataRef.current = data; }, [data]);
 
+  const signIn = () => { const p = new firebase.auth.GoogleAuthProvider(); firebase.auth().signInWithPopup(p).catch(() => { try { firebase.auth().signInWithRedirect(p); } catch (e) {} }); };
+  const signOut = () => { try { firebase.auth().signOut(); } catch (e) {} };
+
   useEffect(() => {
-    setMe(localStorage.getItem("minioncare:me") || "");
-    const ref = stateRef();
-    const cb = ref.on("value", (snap) => {
-      const v = snap.val() || {};
-      setData({ pets: v.pets || [], supplies: v.supplies || [], log: v.log || {} });
-      setLoaded(true);
-    }, (err) => { console.error(err); setLoaded(true); });
-    return () => ref.off("value", cb);
+    const unsub = firebase.auth().onAuthStateChanged((u) => { setUser(u); setAuthReady(true); });
+    return () => unsub();
   }, []);
-  useEffect(() => { if (loaded) localStorage.setItem("minioncare:me", me); }, [me, loaded]);
+
+  useEffect(() => {
+    if (!authed) { setLoaded(false); return; }
+    const ref = stateRef();
+    const cb = ref.on("value", (snap) => { const v = snap.val() || {}; setData({ pets: v.pets || [], supplies: v.supplies || [], log: v.log || {} }); setLoaded(true); }, (err) => { console.error(err); setLoaded(true); });
+    return () => ref.off("value", cb);
+  }, [authed]);
 
   const update = (fn) => setData((prev) => { const next = typeof fn === "function" ? fn(clone(prev)) : fn; stateRef().set(next); return next; });
+
+  // notify the day before a vet visit (fires when the app is open + reminders allowed)
+  useEffect(() => {
+    if (!loaded || typeof Notification === "undefined" || Notification.permission !== "granted") return;
+    (data.pets || []).forEach((p) => (p.appts || []).forEach((a) => {
+      if (a.date && daysBetween(a.date) === 1) {
+        const k = `minioncare:notified:${a.id}:${todayKey()}`;
+        try { if (!localStorage.getItem(k)) { new Notification(`Vet visit tomorrow — ${p.name}`, { body: [a.reason, a.time, a.location].filter(Boolean).join(" · ") }); localStorage.setItem(k, "1"); } } catch (e) {}
+      }
+    }));
+  }, [loaded, data]);
 
   const styleTag = (
     <style>{`
@@ -111,7 +127,24 @@ function PetCare() {
     `}</style>
   );
 
-  if (!loaded) return <div className="pc" style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100vh" }}>{styleTag}<span className="disp" style={{ color: "var(--muted)" }}>Loading…</span></div>;
+  const screen = (inner) => <div className="pc" style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh", padding: 24 }}>{styleTag}{inner}</div>;
+  if (!authReady) return screen(<span className="disp" style={{ color: "var(--muted)" }}>Loading…</span>);
+  if (!user) return screen(
+    <div style={{ textAlign: "center", maxWidth: 320 }}>
+      <PomLogo size={64} />
+      <div className="disp" style={{ fontSize: 26, fontWeight: 700, margin: "10px 0 6px" }}>MinionCare</div>
+      <div style={{ color: "var(--muted)", fontSize: 14, marginBottom: 20 }}>Sign in to see and update the family's pets.</div>
+      <button className="btn btn-accent" onClick={signIn} style={{ fontSize: 15 }}>Sign in with Google</button>
+    </div>
+  );
+  if (!authed) return screen(
+    <div style={{ textAlign: "center", maxWidth: 340 }}>
+      <div className="disp" style={{ fontSize: 20, fontWeight: 700, marginBottom: 8 }}>Not on the list</div>
+      <div style={{ color: "var(--muted)", fontSize: 14, marginBottom: 18 }}>{user.email} isn't on the family access list. Sign in with an approved account, or ask Erika to add this address.</div>
+      <button className="btn" onClick={signOut}>Sign out</button>
+    </div>
+  );
+  if (!loaded) return screen(<span className="disp" style={{ color: "var(--muted)" }}>Loading…</span>);
 
   const pet = data.pets.find((p) => p.id === openPet);
 
@@ -124,9 +157,9 @@ function PetCare() {
             <PomLogo size={40} />
             <div className="disp" style={{ fontSize: 25, fontWeight: 700 }}>MinionCare</div>
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <span style={{ fontSize: 11, color: "var(--muted)" }}>you:</span>
-            <input value={me} onChange={(e) => setMe(e.target.value)} placeholder="name" style={{ width: 78, padding: "5px 8px", fontSize: 12.5 }} />
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2 }}>
+            <span style={{ fontSize: 12.5, fontWeight: 700 }}>{me}</span>
+            <button onClick={signOut} style={{ background: "none", border: "none", color: "var(--muted)", fontSize: 11, cursor: "pointer", padding: 0, textDecoration: "underline" }}>Sign out</button>
           </div>
         </header>
 
@@ -138,10 +171,10 @@ function PetCare() {
               {TABS.map((t) => <button key={t} className={`tabbtn ${tab === t ? "on" : ""}`} onClick={() => setTab(t)}>{t}</button>)}
             </nav>
             <div className="fade" key={tab}>
-              {tab === "Today" && <TodayView data={data} update={update} me={me} onOpen={setOpenPet} />}
+              {tab === "Dashboard" && <DashboardView data={data} update={update} me={me} onOpen={setOpenPet} />}
               {tab === "Pets" && <PetsView data={data} update={update} onOpen={setOpenPet} />}
               {tab === "Supplies" && <SuppliesView data={data} update={update} />}
-              {tab === "More" && <MoreView data={data} setData={setData} update={update} me={me} setMe={setMe} />}
+              {tab === "More" && <MoreView data={data} setData={setData} update={update} me={me} />}
             </div>
           </>
         )}
@@ -171,67 +204,86 @@ function Section({ title, count, children, open, onToggle }) {
 }
 
 // ---------- Today ----------
-function TodayView({ data, update, me, onOpen }) {
+function DashboardView({ data, update, me, onOpen }) {
   const dk = todayKey();
   const log = data.log[dk] || { fed: {}, med: {} };
-  const toggleFed = (petId, fid) => update((d) => { const day = d.log[dk] = d.log[dk] || { fed: {}, med: {} }; const key = `${petId}:${fid}`; if (day.fed[key]) delete day.fed[key]; else day.fed[key] = { by: me || "someone", at: nowTime() }; return d; });
-  const giveDose = (petId, medId) => update((d) => { const pet = d.pets.find((p) => p.id === petId); const med = pet && pet.meds.find((m) => m.id === medId); if (med) med.count = Math.max(0, (Number(med.count) || 0) - 1); const day = d.log[dk] = d.log[dk] || { fed: {}, med: {} }; day.med[medId] = day.med[medId] || []; day.med[medId].push({ by: me || "someone", at: nowTime() }); return d; });
+  const stamp = () => ({ by: me || "someone", at: nowTime() });
+  const toggleFeed = (petId, slot) => update((d) => { const day = d.log[dk] = d.log[dk] || { fed: {}, med: {} }; const k = `${petId}:${slot}`; if (day.fed[k]) delete day.fed[k]; else day.fed[k] = stamp(); return d; });
+  const toggleMedSlot = (petId, slot) => update((d) => {
+    const day = d.log[dk] = d.log[dk] || { fed: {}, med: {} };
+    const k = `${petId}:med${slot}`;
+    const pet = d.pets.find((p) => p.id === petId);
+    const affected = (pet ? pet.meds || [] : []).filter((m) => (m.times || []).includes(slot));
+    if (day.med[k]) { (day.med[k].meds || []).forEach((id) => { const m = pet && pet.meds.find((x) => x.id === id); if (m) m.count = (Number(m.count) || 0) + 1; }); delete day.med[k]; }
+    else { affected.forEach((m) => { m.count = Math.max(0, (Number(m.count) || 0) - 1); }); day.med[k] = Object.assign(stamp(), { meds: affected.map((m) => m.id) }); }
+    return d;
+  });
 
-  const feedings = []; const meds = []; const apptsToday = []; const lowMeds = []; const dueVax = []; const upcoming = [];
+  const apptsToday = []; const lowMeds = []; const dueVax = []; const upcoming = [];
   data.pets.forEach((p) => {
-    (p.feeding || []).forEach((f) => feedings.push({ pet: p, f }));
-    (p.meds || []).forEach((m) => { meds.push({ pet: p, m }); if ((Number(m.count) || 0) <= (Number(m.refillAt) || 0)) lowMeds.push({ pet: p, m }); });
+    (p.meds || []).forEach((m) => { if ((Number(m.count) || 0) <= (Number(m.refillAt) || 0)) lowMeds.push({ pet: p, m }); });
     (p.appts || []).forEach((a) => { if (a.date === dk) apptsToday.push({ pet: p, a }); else if (a.date && daysBetween(a.date) >= 0 && daysBetween(a.date) <= 30) upcoming.push({ pet: p, label: a.reason, date: a.date, d: daysBetween(a.date) }); });
     (p.vaccines || []).forEach((v) => { if (v.due && daysBetween(v.due) <= 30) dueVax.push({ pet: p, v, d: daysBetween(v.due) }); });
   });
   upcoming.sort((a, b) => a.d - b.d);
   const lowSupplies = (data.supplies || []).filter((s) => s.low);
   const orders = (data.supplies || []).filter((s) => s.restock).map((s) => ({ s, d: daysBetween(s.restock) })).filter((o) => o.d <= 7).sort((a, b) => a.d - b.d);
+  const soon = [];
+  data.pets.forEach((p) => (p.appts || []).forEach((a) => { if (a.date) { const dd = daysBetween(a.date); if (dd === 0 || dd === 1) soon.push({ pet: p, a, dd }); } }));
+
+  const HCELL = { fontSize: 10, fontWeight: 700, letterSpacing: ".02em", textTransform: "uppercase", color: "var(--muted)", textAlign: "center", padding: "2px 2px 8px" };
+  const CELL = { display: "flex", justifyContent: "center", alignItems: "center", padding: "10px 2px", borderTop: "1px solid var(--line)" };
 
   return (
     <div style={{ display: "grid", gap: 16 }}>
       <div className="disp" style={{ fontSize: 20, fontWeight: 700 }}>{new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}</div>
 
-      <div className="card" style={{ padding: 16 }}>
-        <div className="disp" style={{ fontSize: 16, fontWeight: 600, marginBottom: 10 }}>Feedings</div>
-        {feedings.length === 0 && <Empty text="No feeding times set yet." />}
-        <div style={{ display: "grid", gap: 8 }}>
-          {feedings.map(({ pet, f }) => { const done = log.fed[`${pet.id}:${f.id}`]; return (
-            <div key={pet.id + f.id} style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <button onClick={() => toggleFed(pet.id, f.id)} style={{ width: 22, height: 22, borderRadius: 7, border: `2px solid ${speciesColor(pet.species)}`, background: done ? speciesColor(pet.species) : "transparent", color: "#fff", cursor: "pointer", flexShrink: 0, fontSize: 12 }}>{done ? "✓" : ""}</button>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 14.5, fontWeight: 600, textDecoration: done ? "line-through" : "none", color: done ? "var(--muted)" : "var(--ink)" }}>{pet.name} · {f.label}</div>
-                <div style={{ fontSize: 11.5, color: "var(--muted)" }}>{f.time || ""}{done ? ` · fed by ${done.by} at ${done.at}` : ""}</div>
-              </div>
-            </div>
-          ); })}
+      {soon.length > 0 && (
+        <div className="card" style={{ padding: 14, borderColor: "var(--accent)", background: "var(--accent-soft)" }}>
+          <div className="disp" style={{ fontSize: 14, fontWeight: 700, marginBottom: 4 }}>Vet reminder</div>
+          {soon.map(({ pet, a, dd }, i) => <div key={"sv" + i} style={{ fontSize: 13.5 }}>{pet.name} \u2014 {a.reason || "vet visit"} {dd === 0 ? "today" : "tomorrow"}{a.time ? ` at ${a.time}` : ""}{a.location ? ` \u00b7 ${a.location}` : ""}</div>)}
         </div>
-      </div>
+      )}
 
-      <div className="card" style={{ padding: 16 }}>
-        <div className="disp" style={{ fontSize: 16, fontWeight: 600, marginBottom: 10 }}>Meds</div>
-        {meds.length === 0 && <Empty text="No medications added yet." />}
-        <div style={{ display: "grid", gap: 10 }}>
-          {meds.map(({ pet, m }) => { const given = (log.med[m.id] || []).length; const low = (Number(m.count) || 0) <= (Number(m.refillAt) || 0); return (
-            <div key={pet.id + m.id} style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 14.5, fontWeight: 600 }}>{pet.name} · {m.name}{m.dose ? ` (${m.dose})` : ""}</div>
-                <div style={{ fontSize: 11.5, color: low ? "var(--warn)" : "var(--muted)" }}>{m.count != null ? `${m.count} ${m.form || "left"} left` : ""}{low ? " · refill soon" : ""}{given ? ` · given ${given}× today` : ""}</div>
-              </div>
-              <button className="btn btn-accent btn-sm" onClick={() => giveDose(pet.id, m.id)}>Give</button>
-            </div>
-          ); })}
+      {data.pets.length === 0 ? <Empty text="Add your pets first (Pets tab) and they'll show up here every day." /> : (
+        <div className="card" style={{ padding: "12px 12px 4px" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1.5fr repeat(4, 1fr)", alignItems: "center" }}>
+            <div style={HCELL} />
+            <div style={HCELL}>B'fast</div>
+            <div style={HCELL}>Dinner</div>
+            <div style={HCELL}>Med AM</div>
+            <div style={HCELL}>Med PM</div>
+            {data.pets.map((p) => {
+              const hasAM = (p.meds || []).some((m) => (m.times || []).includes("AM"));
+              const hasPM = (p.meds || []).some((m) => (m.times || []).includes("PM"));
+              const bf = log.fed[`${p.id}:breakfast`]; const dn = log.fed[`${p.id}:dinner`];
+              const ma = log.med[`${p.id}:medAM`]; const mp = log.med[`${p.id}:medPM`];
+              return (
+                <React.Fragment key={p.id}>
+                  <button onClick={() => onOpen(p.id)} style={{ display: "flex", alignItems: "center", gap: 7, background: "none", border: "none", borderTop: "1px solid var(--line)", cursor: "pointer", textAlign: "left", padding: "10px 4px 10px 0" }}>
+                    {p.photo ? <img src={p.photo} alt="" style={{ width: 26, height: 26, borderRadius: 7, objectFit: "cover", flexShrink: 0 }} /> : <div style={{ width: 26, height: 26, borderRadius: 7, background: "var(--card2)", flexShrink: 0 }} />}
+                    <span className="disp" style={{ fontSize: 13.5, fontWeight: 700, lineHeight: 1.1 }}>{p.name}</span>
+                  </button>
+                  <div style={CELL}><Check done={!!bf} onToggle={() => toggleFeed(p.id, "breakfast")} title={bf ? `${bf.by} \u00b7 ${bf.at}` : "tap = fed"} /></div>
+                  <div style={CELL}><Check done={!!dn} onToggle={() => toggleFeed(p.id, "dinner")} title={dn ? `${dn.by} \u00b7 ${dn.at}` : "tap = fed"} /></div>
+                  <div style={CELL}>{hasAM ? <Check done={!!ma} onToggle={() => toggleMedSlot(p.id, "AM")} title={ma ? `${ma.by} \u00b7 ${ma.at}` : "tap = given"} /> : <span style={{ color: "var(--muted)" }}>\u2014</span>}</div>
+                  <div style={CELL}>{hasPM ? <Check done={!!mp} onToggle={() => toggleMedSlot(p.id, "PM")} title={mp ? `${mp.by} \u00b7 ${mp.at}` : "tap = given"} /> : <span style={{ color: "var(--muted)" }}>\u2014</span>}</div>
+                </React.Fragment>
+              );
+            })}
+          </div>
+          <div style={{ fontSize: 11, color: "var(--muted)", padding: "10px 2px 6px" }}>Tap a box to mark it done \u2014 it logs who and when (tap again to undo). Long-press a box to see who logged it. Tap a pet's name for full details.</div>
         </div>
-      </div>
+      )}
 
       {(apptsToday.length > 0 || lowSupplies.length > 0 || lowMeds.length > 0 || dueVax.length > 0 || upcoming.length > 0 || orders.length > 0) && (
         <div className="card" style={{ padding: 16 }}>
           <div className="disp" style={{ fontSize: 16, fontWeight: 600, marginBottom: 10 }}>Heads up</div>
           <div style={{ display: "grid", gap: 8, fontSize: 13.5 }}>
-            {apptsToday.map(({ pet, a }, i) => <div key={"ap" + i}><strong>Today:</strong> {pet.name} — {a.reason} {a.time || ""}</div>)}
+            {apptsToday.map(({ pet, a }, i) => <div key={"ap" + i}><strong>Today:</strong> {pet.name} \u2014 {a.reason} {a.time || ""}</div>)}
             {orders.map(({ s, d }, i) => <div key={"or" + i} style={{ color: d < 0 ? "var(--warn)" : "var(--ink)" }}>{s.item} order {d < 0 ? `${-d}d overdue` : d === 0 ? "arrives today" : `arrives in ${d}d`}</div>)}
-            {dueVax.map(({ pet, v, d }, i) => <div key={"vx" + i} style={{ color: d < 0 ? "var(--warn)" : "var(--ink)" }}>{pet.name} — {v.name} vaccine {d < 0 ? `overdue` : d === 0 ? "due today" : `due in ${d}d`}</div>)}
-            {upcoming.slice(0, 4).map((u, i) => <div key={"up" + i} style={{ color: "var(--muted)" }}>{u.pet.name} — {u.label} in {u.d}d</div>)}
+            {dueVax.map(({ pet, v, d }, i) => <div key={"vx" + i} style={{ color: d < 0 ? "var(--warn)" : "var(--ink)" }}>{pet.name} \u2014 {v.name} vaccine {d < 0 ? `overdue` : d === 0 ? "due today" : `due in ${d}d`}</div>)}
+            {upcoming.slice(0, 4).map((u, i) => <div key={"up" + i} style={{ color: "var(--muted)" }}>{u.pet.name} \u2014 {u.label} in {u.d}d</div>)}
             {lowMeds.map(({ pet, m }, i) => <div key={"lm" + i} style={{ color: "var(--warn)" }}>Refill {pet.name}'s {m.name} ({m.count} {m.form || "left"})</div>)}
             {lowSupplies.map((s, i) => <div key={"ls" + i} style={{ color: "var(--warn)" }}>Restock {s.item}</div>)}
           </div>
@@ -239,6 +291,10 @@ function TodayView({ data, update, me, onOpen }) {
       )}
     </div>
   );
+}
+
+function Check({ done, onToggle, title }) {
+  return <button title={title} onClick={onToggle} style={{ width: 26, height: 26, borderRadius: 7, border: "2px solid var(--accent)", background: done ? "var(--accent)" : "transparent", color: "#fff", cursor: "pointer", fontSize: 13, lineHeight: 1, padding: 0 }}>{done ? "\u2713" : ""}</button>;
 }
 
 // ---------- Pets list ----------
@@ -314,42 +370,71 @@ function PetDetail({ pet, update, me, onBack }) {
         </div>
       </Section>
 
-      <Section title="Feeding" count={(pet.feeding || []).length} open={openSec === "feeding"} onToggle={() => toggle("feeding")}>
-        <ListEditor items={pet.feeding || []} cols={[{ k: "label", ph: "Breakfast" }, { k: "time", ph: "8am", flex: "0 0 34%" }]}
-          onAdd={() => mutP((p) => { p.feeding = [...(p.feeding || []), { id: uid("f"), label: "Meal", time: "" }]; })}
-          onSet={(id, patch) => mutP((p) => { p.feeding = p.feeding.map((x) => x.id === id ? { ...x, ...patch } : x); })}
-          onRm={(id) => mutP((p) => { p.feeding = p.feeding.filter((x) => x.id !== id); })} />
+      <Section title="Food & feeding" count={(pet.feeding || []).length} open={openSec === "feeding"} onToggle={() => toggle("feeding")}>
+        <div style={{ display: "grid", gap: 12 }}>
+          <div><label>Food brand</label><input value={pet.foodBrand || ""} onChange={(e) => setP({ foodBrand: e.target.value })} placeholder="e.g. Hill's Science Diet" /></div>
+          <div><label>Food notes</label><input value={pet.foodNotes || ""} onChange={(e) => setP({ foodNotes: e.target.value })} placeholder="kibble + spoon of wet, no chicken…" /></div>
+          <div>
+            <label>Meals</label>
+            <div style={{ display: "grid", gap: 8 }}>
+              {(pet.feeding || []).length === 0 && <Empty text="No meals yet." />}
+              {(pet.feeding || []).map((f) => (
+                <div key={f.id} style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <input value={f.label || ""} onChange={(e) => mutP((p) => { p.feeding = p.feeding.map((x) => x.id === f.id ? { ...x, label: e.target.value } : x); })} placeholder="Breakfast" style={{ flex: 1 }} />
+                  <input value={f.time || ""} onChange={(e) => mutP((p) => { p.feeding = p.feeding.map((x) => x.id === f.id ? { ...x, time: e.target.value } : x); })} placeholder="8am" style={{ flex: "0 0 23%" }} />
+                  <input value={f.amount || ""} onChange={(e) => mutP((p) => { p.feeding = p.feeding.map((x) => x.id === f.id ? { ...x, amount: e.target.value } : x); })} placeholder="1 cup" style={{ flex: "0 0 27%" }} />
+                  <button onClick={() => mutP((p) => { p.feeding = p.feeding.filter((x) => x.id !== f.id); })} style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", fontSize: 17 }}>×</button>
+                </div>
+              ))}
+              <button className="btn" style={{ justifySelf: "start" }} onClick={() => mutP((p) => { p.feeding = [...(p.feeding || []), { id: uid("f"), label: "Meal", time: "", amount: "" }]; })}>+ meal</button>
+            </div>
+          </div>
+        </div>
       </Section>
 
       <Section title="Meds & supplements" count={(pet.meds || []).length} open={openSec === "meds"} onToggle={() => toggle("meds")}>
         <div style={{ display: "grid", gap: 12 }}>
           {(pet.meds || []).length === 0 && <Empty text="No meds yet." />}
           {(pet.meds || []).map((m) => { const low = (Number(m.count) || 0) <= (Number(m.refillAt) || 0); return (
-            <div key={m.id} style={{ border: "1px solid var(--line)", borderRadius: 12, padding: 12, display: "grid", gap: 8 }}>
-              <div style={{ display: "flex", gap: 8 }}>
-                <input value={m.name} onChange={(e) => mutP((p) => { p.meds = p.meds.map((x) => x.id === m.id ? { ...x, name: e.target.value } : x); })} placeholder="Med name" />
-                <input value={m.dose} onChange={(e) => mutP((p) => { p.meds = p.meds.map((x) => x.id === m.id ? { ...x, dose: e.target.value } : x); })} placeholder="dose" style={{ flex: "0 0 34%" }} />
-              </div>
-              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <select value={m.form} onChange={(e) => mutP((p) => { p.meds = p.meds.map((x) => x.id === m.id ? { ...x, form: e.target.value } : x); })} style={{ flex: "0 0 30%", padding: "8px 9px", fontSize: 13 }}>
-                  <option value="pills">pills</option><option value="puffs">puffs</option><option value="ml">ml</option><option value="doses">doses</option>
-                </select>
-                <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                  <button className="btn btn-sm" onClick={() => mutP((p) => { p.meds = p.meds.map((x) => x.id === m.id ? { ...x, count: Math.max(0, (Number(x.count) || 0) - 1) } : x); })}>–</button>
-                  <span className="disp" style={{ fontSize: 18, fontWeight: 700, minWidth: 30, textAlign: "center", color: low ? "var(--warn)" : "var(--ink)" }}>{m.count || 0}</span>
-                  <button className="btn btn-sm" onClick={() => mutP((p) => { p.meds = p.meds.map((x) => x.id === m.id ? { ...x, count: (Number(x.count) || 0) + 1 } : x); })}>+</button>
+            <div key={m.id} style={{ border: "1px solid var(--line)", borderRadius: 12, padding: 12, display: "grid", gap: 10 }}>
+              <input value={m.name} onChange={(e) => mutP((p) => { p.meds = p.meds.map((x) => x.id === m.id ? { ...x, name: e.target.value } : x); })} placeholder="Medicine or supplement name" />
+              <div style={{ display: "flex", gap: 10, alignItems: "flex-end" }}>
+                <div style={{ flex: 1 }}>
+                  <label>How many you have</label>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <button className="btn btn-sm" onClick={() => mutP((p) => { p.meds = p.meds.map((x) => x.id === m.id ? { ...x, count: Math.max(0, (Number(x.count) || 0) - 1) } : x); })}>–</button>
+                    <span className="disp" style={{ fontSize: 20, fontWeight: 700, minWidth: 34, textAlign: "center", color: low ? "var(--warn)" : "var(--ink)" }}>{m.count || 0}</span>
+                    <button className="btn btn-sm" onClick={() => mutP((p) => { p.meds = p.meds.map((x) => x.id === m.id ? { ...x, count: (Number(x.count) || 0) + 1 } : x); })}>+</button>
+                  </div>
                 </div>
-                <input type="number" value={m.refillAt} onChange={(e) => mutP((p) => { p.meds = p.meds.map((x) => x.id === m.id ? { ...x, refillAt: Number(e.target.value) || 0 } : x); })} placeholder="refill at" style={{ flex: 1, fontSize: 13, padding: "8px 9px" }} />
+                <div style={{ flex: "0 0 28%" }}>
+                  <label>Unit</label>
+                  <select value={m.form} onChange={(e) => mutP((p) => { p.meds = p.meds.map((x) => x.id === m.id ? { ...x, form: e.target.value } : x); })} style={{ padding: "8px 9px", fontSize: 13 }}>
+                    <option value="pills">pills</option><option value="puffs">puffs</option><option value="ml">ml</option><option value="doses">doses</option>
+                  </select>
+                </div>
+                <div style={{ flex: "0 0 26%" }}>
+                  <label>Refill at</label>
+                  <input type="number" value={m.refillAt} onChange={(e) => mutP((p) => { p.meds = p.meds.map((x) => x.id === m.id ? { ...x, refillAt: Number(e.target.value) || 0 } : x); })} style={{ fontSize: 13, padding: "8px 9px" }} />
+                </div>
               </div>
-              <input value={m.schedule} onChange={(e) => mutP((p) => { p.meds = p.meds.map((x) => x.id === m.id ? { ...x, schedule: e.target.value } : x); })} placeholder="schedule (e.g. 2× daily)" style={{ fontSize: 13 }} />
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                {low ? <span style={{ fontSize: 12, color: "var(--warn)", fontWeight: 700 }}>refill soon</span> : <span />}
+              <div><label>Dose each time (optional)</label><input value={m.dose} onChange={(e) => mutP((p) => { p.meds = p.meds.map((x) => x.id === m.id ? { ...x, dose: e.target.value } : x); })} placeholder="e.g. 16mg, 1 tablet" /></div>
+              <div>
+                <label>When to give</label>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  {SLOTS.map((sl) => { const on = (m.times || []).includes(sl); return (
+                    <button key={sl} onClick={() => mutP((p) => { p.meds = p.meds.map((x) => x.id === m.id ? { ...x, times: on ? (x.times || []).filter((t) => t !== sl) : [...(x.times || []), sl] } : x); })} style={{ fontFamily: "inherit", cursor: "pointer", fontSize: 12.5, fontWeight: 700, padding: "6px 12px", borderRadius: 20, border: "1px solid var(--line)", background: on ? "var(--accent)" : "var(--card2)", color: on ? "#fff" : "var(--ink)" }}>{sl}</button>
+                  ); })}
+                </div>
+              </div>
+              <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 10 }}>
+                {low && <span style={{ fontSize: 12, color: "var(--warn)", fontWeight: 700, marginRight: "auto" }}>refill soon</span>}
                 <button className="btn btn-sm" style={{ color: "var(--warn)" }} onClick={() => mutP((p) => { p.meds = p.meds.filter((x) => x.id !== m.id); })}>remove</button>
               </div>
             </div>
           ); })}
-          <button className="btn" style={{ justifySelf: "start" }} onClick={() => mutP((p) => { p.meds = [...(p.meds || []), { id: uid("m"), name: "", dose: "", form: "pills", count: 0, refillAt: 5, schedule: "" }]; })}>+ med</button>
-          <div style={{ fontSize: 11.5, color: "var(--muted)" }}>Give doses from the Today tab — each one ticks the count down.</div>
+          <button className="btn" style={{ justifySelf: "start" }} onClick={() => mutP((p) => { p.meds = [...(p.meds || []), { id: uid("m"), name: "", dose: "", form: "pills", count: 0, refillAt: 5, times: ["AM"] }]; })}>+ med</button>
+          <div style={{ fontSize: 11.5, color: "var(--muted)" }}>Set how many you have and pick AM/PM. You'll check each dose off on the Dashboard tab — every "Yes" subtracts one and flags a refill when you hit your refill number.</div>
         </div>
       </Section>
 
@@ -369,15 +454,18 @@ function PetDetail({ pet, update, me, onBack }) {
       </Section>
 
       <Section title="Vaccines" count={(pet.vaccines || []).length} open={openSec === "vax"} onToggle={() => toggle("vax")}>
-        <div style={{ display: "grid", gap: 10 }}>
+        <div style={{ display: "grid", gap: 12 }}>
           {(pet.vaccines || []).map((v) => (
-            <div key={v.id} style={{ border: "1px solid var(--line)", borderRadius: 12, padding: 10, display: "grid", gap: 8 }}>
+            <div key={v.id} style={{ border: "1px solid var(--line)", borderRadius: 12, padding: 12, display: "grid", gap: 10 }}>
               <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <input value={v.name} onChange={(e) => mutP((p) => { p.vaccines = p.vaccines.map((x) => x.id === v.id ? { ...x, name: e.target.value } : x); })} placeholder="Rabies" style={{ flex: 1 }} />
-                <input type="date" value={v.due} onChange={(e) => mutP((p) => { p.vaccines = p.vaccines.map((x) => x.id === v.id ? { ...x, due: e.target.value } : x); })} style={{ flex: "0 0 40%" }} />
-                <button className="btn btn-sm" onClick={() => addToCal({ title: `${pet.name}: ${v.name} vaccine due`, date: v.due, details: "From MinionCare" })}>cal</button>
+                <input value={v.name} onChange={(e) => mutP((p) => { p.vaccines = p.vaccines.map((x) => x.id === v.id ? { ...x, name: e.target.value } : x); })} placeholder="Vaccine (e.g. Rabies)" style={{ flex: 1 }} />
                 <button onClick={() => mutP((p) => { p.vaccines = p.vaccines.filter((x) => x.id !== v.id); })} style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", fontSize: 17 }}>×</button>
               </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <div style={{ flex: 1 }}><label>Administered</label><input type="date" value={v.given || ""} onChange={(e) => mutP((p) => { p.vaccines = p.vaccines.map((x) => x.id === v.id ? { ...x, given: e.target.value } : x); })} /></div>
+                <div style={{ flex: 1 }}><label>Next due</label><input type="date" value={v.due || ""} onChange={(e) => mutP((p) => { p.vaccines = p.vaccines.map((x) => x.id === v.id ? { ...x, due: e.target.value } : x); })} /></div>
+              </div>
+              <div><label>Vet who gave it</label><input value={v.vet || ""} onChange={(e) => mutP((p) => { p.vaccines = p.vaccines.map((x) => x.id === v.id ? { ...x, vet: e.target.value } : x); })} placeholder="clinic name" /></div>
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                 {v.proof ? (<>
                   <a href={v.proof} target="_blank" rel="noreferrer"><img src={v.proof} alt="proof" style={{ height: 46, borderRadius: 8, border: "1px solid var(--line)", display: "block" }} /></a>
@@ -387,28 +475,32 @@ function PetDetail({ pet, update, me, onBack }) {
                   <label className="btn btn-sm" style={{ cursor: "pointer" }}>+ attach proof<input type="file" accept="image/*" style={{ display: "none" }} onChange={async (e) => { const f = e.target.files && e.target.files[0]; if (f) { const d = await fileToThumb(f, 1100); mutP((p) => { p.vaccines = p.vaccines.map((x) => x.id === v.id ? { ...x, proof: d } : x); }); } e.target.value = ""; }} /></label>
                 )}
               </div>
+              <button className="btn btn-sm" style={{ justifySelf: "start" }} onClick={() => addToCal({ title: `${pet.name}: ${v.name || "vaccine"} due`, date: v.due, details: `Last given ${v.given || "?"}${v.vet ? " at " + v.vet : ""}. From MinionCare` })}>+ Google Cal (due date)</button>
             </div>
           ))}
-          <button className="btn" style={{ justifySelf: "start" }} onClick={() => mutP((p) => { p.vaccines = [...(p.vaccines || []), { id: uid("v"), name: "", due: "" }]; })}>+ vaccine</button>
+          <button className="btn" style={{ justifySelf: "start" }} onClick={() => mutP((p) => { p.vaccines = [...(p.vaccines || []), { id: uid("v"), name: "", given: "", due: "", vet: "" }]; })}>+ vaccine</button>
         </div>
       </Section>
 
-      <Section title="Vet appointments" count={(pet.appts || []).length} open={openSec === "appts"} onToggle={() => toggle("appts")}>
+      <Section title="Vet visits" count={(pet.appts || []).length} open={openSec === "appts"} onToggle={() => toggle("appts")}>
         <div style={{ display: "grid", gap: 12 }}>
           {(pet.appts || []).map((a) => (
-            <div key={a.id} style={{ border: "1px solid var(--line)", borderRadius: 12, padding: 12, display: "grid", gap: 8 }}>
-              <input value={a.reason} onChange={(e) => mutP((p) => { p.appts = p.appts.map((x) => x.id === a.id ? { ...x, reason: e.target.value } : x); })} placeholder="Checkup" />
+            <div key={a.id} style={{ border: "1px solid var(--line)", borderRadius: 12, padding: 12, display: "grid", gap: 10 }}>
+              <div><label>Purpose of visit</label><input value={a.reason} onChange={(e) => mutP((p) => { p.appts = p.appts.map((x) => x.id === a.id ? { ...x, reason: e.target.value } : x); })} placeholder="Annual checkup, dental, etc." /></div>
               <div style={{ display: "flex", gap: 8 }}>
-                <input type="date" value={a.date} onChange={(e) => mutP((p) => { p.appts = p.appts.map((x) => x.id === a.id ? { ...x, date: e.target.value } : x); })} />
-                <input type="time" value={a.time} onChange={(e) => mutP((p) => { p.appts = p.appts.map((x) => x.id === a.id ? { ...x, time: e.target.value } : x); })} style={{ flex: "0 0 38%" }} />
+                <div style={{ flex: 1 }}><label>Date</label><input type="date" value={a.date} onChange={(e) => mutP((p) => { p.appts = p.appts.map((x) => x.id === a.id ? { ...x, date: e.target.value } : x); })} /></div>
+                <div style={{ flex: "0 0 38%" }}><label>Time</label><input type="time" value={a.time} onChange={(e) => mutP((p) => { p.appts = p.appts.map((x) => x.id === a.id ? { ...x, time: e.target.value } : x); })} /></div>
               </div>
+              <div><label>Location</label><input value={a.location || ""} onChange={(e) => mutP((p) => { p.appts = p.appts.map((x) => x.id === a.id ? { ...x, location: e.target.value } : x); })} placeholder="clinic name / address" /></div>
+              <div><label>Reminders / notes</label><input value={a.reminder || ""} onChange={(e) => mutP((p) => { p.appts = p.appts.map((x) => x.id === a.id ? { ...x, reminder: e.target.value } : x); })} placeholder="fast beforehand, bring records…" /></div>
               <div style={{ display: "flex", gap: 8, justifyContent: "space-between" }}>
-                <button className="btn btn-sm btn-accent" onClick={() => addToCal({ title: `${pet.name}: ${a.reason || "Vet"}`, date: a.date, time: a.time, details: pet.vet || "" })}>+ Google Cal</button>
+                <button className="btn btn-sm btn-accent" onClick={() => addToCal({ title: `${pet.name}: ${a.reason || "Vet visit"}`, date: a.date, time: a.time, location: a.location || "", details: [a.reminder, "From MinionCare"].filter(Boolean).join(" — ") })}>+ Google Cal</button>
                 <button className="btn btn-sm" style={{ color: "var(--warn)" }} onClick={() => mutP((p) => { p.appts = p.appts.filter((x) => x.id !== a.id); })}>remove</button>
               </div>
             </div>
           ))}
-          <button className="btn" style={{ justifySelf: "start" }} onClick={() => mutP((p) => { p.appts = [...(p.appts || []), { id: uid("a"), reason: "", date: "", time: "" }]; })}>+ appointment</button>
+          <button className="btn" style={{ justifySelf: "start" }} onClick={() => mutP((p) => { p.appts = [...(p.appts || []), { id: uid("a"), reason: "", date: "", time: "", location: "", reminder: "" }]; })}>+ add a vet visit</button>
+          <div style={{ fontSize: 11.5, color: "var(--muted)" }}>Tap "+ Google Cal" to drop the visit on your calendar — set its reminder to "1 day before" there for a reliable day-ahead alert. The app also nudges you when it's open (see below).</div>
         </div>
       </Section>
 
@@ -534,14 +626,16 @@ function SuppliesView({ data, update }) {
 }
 
 // ---------- More ----------
-function MoreView({ data, setData, update, me, setMe }) {
+function MoreView({ data, setData, update, me }) {
   const [sheet, setSheet] = useState("");
   const careSheet = () => {
     let t = `MINIONCARE — CARE SHEET\n\n`;
     data.pets.forEach((p) => {
       t += `${p.name} (${p.species}${p.breed ? ", " + p.breed : ""})\n`;
-      if (p.feeding && p.feeding.length) t += `  Feeding: ${p.feeding.map((f) => `${f.label} ${f.time}`).join(", ")}\n`;
-      if (p.meds && p.meds.length) t += `  Meds: ${p.meds.map((m) => `${m.name} ${m.dose} (${m.schedule})`).join("; ")}\n`;
+      if (p.foodBrand || p.foodNotes) t += `  Food: ${p.foodBrand || ""}${p.foodNotes ? " — " + p.foodNotes : ""}\n`;
+      if (p.feeding && p.feeding.length) t += `  Meals: ${p.feeding.map((f) => `${f.label} ${f.time}${f.amount ? " (" + f.amount + ")" : ""}`).join(", ")}\n`;
+      if (p.meds && p.meds.length) t += `  Meds: ${p.meds.map((m) => `${m.name}${m.dose ? " " + m.dose : ""}${(m.times && m.times.length) ? " (" + m.times.join(" & ") + ")" : ""}${(m.count != null && m.count !== "") ? " — " + m.count + " " + (m.form || "doses") + " left" : ""}`).join("; ")}\n`;
+      if (p.grooming && p.grooming.length) t += `  Grooming: ${p.grooming.map((g) => `${g.label}${g.everyDays ? " every " + g.everyDays + "d" : ""}`).join(", ")}\n`;
       if (p.vet) t += `  Vet: ${p.vet}\n`;
       if (p.notes) t += `  Notes: ${p.notes}\n`;
       t += `\n`;
@@ -552,12 +646,14 @@ function MoreView({ data, setData, update, me, setMe }) {
   const exportXlsx = () => {
     try {
       const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(data.pets.map((p) => ({ Name: p.name, Species: p.species, Breed: p.breed, Birthday: p.birthday, Vet: p.vet, Microchip: p.microchip, Notes: p.notes }))), "Pets");
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(data.pets.map((p) => ({ Name: p.name, Species: p.species, Breed: p.breed, Birthday: p.birthday, "Food brand": p.foodBrand, "Food notes": p.foodNotes, Vet: p.vet, Microchip: p.microchip, Notes: p.notes }))), "Pets");
       const meds = []; data.pets.forEach((p) => (p.meds || []).forEach((m) => meds.push({ Pet: p.name, Med: m.name, Dose: m.dose, Schedule: m.schedule, Remaining: m.count, Form: m.form })));
       XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(meds), "Meds");
       const appts = []; data.pets.forEach((p) => (p.appts || []).forEach((a) => appts.push({ Pet: p.name, Reason: a.reason, Date: a.date, Time: a.time })));
       XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(appts), "Appointments");
       XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet((data.supplies || []).map((s) => ({ Item: s.item, Price: s.price, "Next order": s.restock, "Chewy link": s.link, "On list": s.low ? "yes" : "no" }))), "Supplies");
+      const vax = []; data.pets.forEach((p) => (p.vaccines || []).forEach((v) => vax.push({ Pet: p.name, Vaccine: v.name, Administered: v.given, "Next due": v.due, Vet: v.vet, "Proof on file": v.proof ? "yes" : "no" })));
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(vax), "Vaccines");
       const out = XLSX.write(wb, { bookType: "xlsx", type: "array" });
       const url = URL.createObjectURL(new Blob([out], { type: "application/octet-stream" }));
       const a = document.createElement("a"); a.href = url; a.download = "pet-care.xlsx"; document.body.appendChild(a); a.click(); document.body.removeChild(a); setTimeout(() => URL.revokeObjectURL(url), 1500);
@@ -570,8 +666,13 @@ function MoreView({ data, setData, update, me, setMe }) {
     <div style={{ display: "grid", gap: 16 }}>
       <div className="card" style={{ padding: 16 }}>
         <div className="disp" style={{ fontSize: 16, fontWeight: 600, marginBottom: 8 }}>Sharing with family</div>
-        <div style={{ fontSize: 13, color: "var(--muted)" }}>Everyone you share this app's link with sees and edits the same pets — it syncs automatically every few seconds and when you reopen it. Set your name up top so feedings and doses show who did them.</div>
-        <div style={{ marginTop: 12 }}><label>Your name (this device)</label><input value={me} onChange={(e) => setMe(e.target.value)} placeholder="e.g. Erika" /></div>
+        <div style={{ fontSize: 13, color: "var(--muted)" }}>Everyone on the family list signs in with their own Google account and sees the same pets, syncing in real time. Whatever you check off is automatically stamped with your name — no need to type it.</div>
+      </div>
+
+      <div className="card" style={{ padding: 16 }}>
+        <div className="disp" style={{ fontSize: 16, fontWeight: 600, marginBottom: 8 }}>Vet visit reminders</div>
+        <div style={{ fontSize: 13, color: "var(--muted)" }}>Turn on reminders to get a day-before nudge for vet visits while the app is open on this device. For a guaranteed alert even when the app is closed, use the "+ Google Cal" button on a visit and set its reminder to 1 day before.</div>
+        <button className="btn" style={{ marginTop: 12 }} onClick={() => { try { if (typeof Notification !== "undefined") Notification.requestPermission(); } catch (e) {} }}>Turn on reminders</button>
       </div>
 
       <div className="card" style={{ padding: 16 }}>
